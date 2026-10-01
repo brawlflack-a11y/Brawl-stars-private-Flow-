@@ -2,6 +2,10 @@ name: Проверка бота и канала
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - bot/check.py
+      - .github/workflows/check.yml
 
 jobs:
   check:
