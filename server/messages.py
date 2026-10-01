@@ -1,0 +1,23 @@
+"""ID сообщений. 1xxxx — от клиента, 2xxxx — от сервера."""
+
+# Клиент -> сервер
+LOGIN = 10101
+KEEP_ALIVE = 10108
+SET_NAME = 10212
+BUY_ITEM = 14100
+GET_PROFILE = 14101
+
+# Сервер -> клиент
+LOGIN_FAILED = 20103
+LOGIN_OK = 20104
+KEEP_ALIVE_OK = 20108
+SET_NAME_RESULT = 20212
+BUY_RESULT = 24100
+PROFILE = 24101
+ERROR = 29999
+
+# Коды результата покупки
+BUY_OK = 0
+BUY_NOT_ENOUGH = 1
+BUY_UNKNOWN_ITEM = 2
+BUY_ALREADY_OWNED = 3
