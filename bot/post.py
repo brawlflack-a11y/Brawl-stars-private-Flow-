@@ -2,7 +2,8 @@
 """Публикует следующий неопубликованный пост из channel/posts в Telegram-канал.
 
 Посты публикуются по алфавиту имён файлов:
-  *.html — текстовый пост (Telegram HTML-разметка)
+  *.html — текстовый пост (Telegram HTML-разметка); если рядом лежит
+           картинка с тем же именем (*.png), пост уйдёт фото с подписью
   *.json — опрос или викторина (поля как у метода sendPoll)
 
 Переменные окружения:
@@ -19,6 +20,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,6 +47,14 @@ def next_post(state):
 
 
 def build_request(path, chat_id):
+    photo = path.with_suffix(".png")
+    if path.suffix == ".html" and photo.exists():
+        return "sendPhoto", {
+            "chat_id": chat_id,
+            "caption": path.read_text(encoding="utf-8").strip(),
+            "parse_mode": "HTML",
+            "photo": photo,
+        }
     if path.suffix == ".html":
         return "sendMessage", {
             "chat_id": chat_id,
@@ -67,11 +77,33 @@ def build_request(path, chat_id):
     return "sendPoll", payload
 
 
+def encode_multipart(payload):
+    boundary = uuid.uuid4().hex
+    body = b""
+    for key, value in payload.items():
+        if isinstance(value, Path):
+            header = (
+                f'Content-Disposition: form-data; name="{key}"; filename="{value.name}"\r\n'
+                "Content-Type: image/png\r\n\r\n"
+            )
+            data = value.read_bytes()
+        else:
+            header = f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+            data = str(value).encode("utf-8")
+        body += f"--{boundary}\r\n{header}".encode("utf-8") + data + b"\r\n"
+    body += f"--{boundary}--\r\n".encode("utf-8")
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
 def call_api(token, method, payload):
+    if any(isinstance(value, Path) for value in payload.values()):
+        data, content_type = encode_multipart(payload)
+    else:
+        data, content_type = json.dumps(payload).encode("utf-8"), "application/json"
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/{method}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        data=data,
+        headers={"Content-Type": content_type},
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -93,7 +125,7 @@ def main():
 
     if dry_run:
         print(f"[dry-run] {path.name} -> {method}")
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         return 0
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
