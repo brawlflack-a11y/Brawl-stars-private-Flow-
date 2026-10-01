@@ -83,3 +83,12 @@ class Database:
                 "INSERT INTO inventory (account_id, item_id) VALUES (?, ?)", (account_id, item_id)
             )
         return True
+
+    def add_trophies(self, account_id: int, delta: int) -> int:
+        """Меняет трофеи (не ниже нуля) и возвращает новое значение."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE accounts SET trophies = MAX(0, trophies + ?) WHERE id = ?",
+                (delta, account_id),
+            )
+        return self.get_account(account_id).trophies

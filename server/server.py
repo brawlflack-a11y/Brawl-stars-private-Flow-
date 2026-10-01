@@ -1,6 +1,6 @@
 """Лобби-сервер: принимает TCP-подключения, обрабатывает логин, профиль и магазин.
 
-Запуск:  python -m server.server --port 7777 --db game.db
+Запуск:  python -m server.server --port 7777 --battle-port 7778 --db game.db
 """
 import argparse
 import asyncio
@@ -8,12 +8,16 @@ import logging
 import secrets
 
 from . import messages as m
+from .battle import DRAW, MATCH_DURATION, BattleServer, Room
 from .database import Database
 from .protocol import ProtocolError, Reader, Writer, encode_packet, read_packet
 
 log = logging.getLogger("lobby")
 
 IDLE_TIMEOUT = 60  # секунд без пакетов — отключаем
+MATCH_SIZE = 6     # игроков в матче (3 на 3)
+TROPHIES_WIN = 8
+TROPHIES_LOSS = -4
 
 # Каталог магазина: id -> (название, валюта, цена). Цены знает только сервер.
 SHOP = {
@@ -50,7 +54,9 @@ class Session:
         except ProtocolError as e:
             log.warning("protocol error from %s: %s", self.peer, e)
         finally:
-            self.server.online.discard(self.account_id)
+            self.server.leave_queue(self)
+            if self.server.sessions.get(self.account_id) is self:
+                del self.server.sessions[self.account_id]
             self.writer.close()
             log.info("disconnect %s (account %s)", self.peer, self.account_id)
 
@@ -79,12 +85,12 @@ class Session:
                 self.send(m.LOGIN_FAILED, Writer().write_string("Неверный аккаунт или токен"))
                 return
 
-        if account.id in self.server.online:
+        if account.id in self.server.sessions:
             self.send(m.LOGIN_FAILED, Writer().write_string("Аккаунт уже в игре"))
             return
 
         self.account_id = account.id
-        self.server.online.add(account.id)
+        self.server.sessions[account.id] = self
         self.send(m.LOGIN_OK, Writer().write_int(account.id).write_string(account.token))
         self.send_profile()
 
@@ -115,6 +121,24 @@ class Session:
         self.send(m.BUY_RESULT, Writer().write_int(item_id).write_int(result))
         self.send_profile()
 
+    def on_start_matchmaking(self, r: Reader):
+        if self in self.server.queue or self.account_id in self.server.in_battle:
+            self.send_matchmaking_status(m.MM_ALREADY_BUSY)
+            return
+        self.server.queue.append(self)
+        self.send_matchmaking_status(m.MM_SEARCHING)
+        self.server.try_make_match()
+
+    def on_cancel_matchmaking(self, r: Reader):
+        self.server.leave_queue(self)
+        self.send_matchmaking_status(m.MM_CANCELLED)
+
+    def send_matchmaking_status(self, status: int):
+        self.send(m.MATCHMAKING_STATUS, Writer()
+                  .write_int(status)
+                  .write_int(len(self.server.queue))
+                  .write_int(self.server.match_size))
+
     def send_profile(self):
         acc = self.db.get_account(self.account_id)
         items = self.db.get_items(self.account_id)
@@ -138,23 +162,72 @@ HANDLERS = {
     m.GET_PROFILE: Session.on_get_profile,
     m.SET_NAME: Session.on_set_name,
     m.BUY_ITEM: Session.on_buy_item,
+    m.START_MATCHMAKING: Session.on_start_matchmaking,
+    m.CANCEL_MATCHMAKING: Session.on_cancel_matchmaking,
 }
 
 
 class GameServer:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, match_size: int = MATCH_SIZE,
+                 match_duration: float = MATCH_DURATION, public_host: str = "127.0.0.1"):
+        if match_size < 2:
+            raise ValueError("match_size must be at least 2")
         self.db = Database(db_path)
-        self.online: set[int] = set()
+        self.match_size = match_size
+        self.public_host = public_host  # адрес боевого сервера, который получат клиенты
+        self.sessions: dict[int, Session] = {}
+        self.queue: list[Session] = []
+        self.in_battle: set[int] = set()
+        self.battle = BattleServer(self.on_battle_result, match_duration)
+        self.battle_port = 0
         self._server: asyncio.base_events.Server | None = None
 
-    async def start(self, host: str, port: int) -> int:
+    async def start(self, host: str, port: int, battle_port: int = 0) -> int:
+        self.battle_port = await self.battle.start(host, battle_port)
         self._server = await asyncio.start_server(self._on_connect, host, port)
         return self._server.sockets[0].getsockname()[1]
+
+    def leave_queue(self, session: Session):
+        if session in self.queue:
+            self.queue.remove(session)
+
+    def try_make_match(self):
+        while len(self.queue) >= self.match_size:
+            group, self.queue = self.queue[:self.match_size], self.queue[self.match_size:]
+            room, tickets = self.battle.create_room([s.account_id for s in group])
+            for slot, (session, ticket) in enumerate(zip(group, tickets)):
+                self.in_battle.add(session.account_id)
+                session.send(m.MATCH_FOUND, Writer()
+                             .write_int(room.room_id)
+                             .write_string(self.public_host)
+                             .write_int(self.battle_port)
+                             .write_string(ticket)
+                             .write_int(slot)
+                             .write_int(room.players[slot].team))
+
+    def on_battle_result(self, room: Room):
+        for p in room.players:
+            self.in_battle.discard(p.account_id)
+            if room.winner == DRAW:
+                result, delta = m.RESULT_DRAW, 0
+            elif room.winner == p.team:
+                result, delta = m.RESULT_WIN, TROPHIES_WIN
+            else:
+                result, delta = m.RESULT_LOSS, TROPHIES_LOSS
+            trophies = self.db.add_trophies(p.account_id, delta)
+            session = self.sessions.get(p.account_id)
+            if session:
+                session.send(m.BATTLE_RESULT, Writer()
+                             .write_int(room.room_id)
+                             .write_int(result)
+                             .write_int(delta)
+                             .write_int(trophies))
 
     async def _on_connect(self, reader, writer):
         await Session(self, reader, writer).run()
 
     async def stop(self):
+        await self.battle.stop()
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -165,13 +238,19 @@ async def main():
     parser = argparse.ArgumentParser(description="Лобби-сервер")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7777)
+    parser.add_argument("--battle-port", type=int, default=7778)
+    parser.add_argument("--public-host", default="127.0.0.1",
+                        help="адрес боевого сервера, который сообщается клиентам")
+    parser.add_argument("--match-size", type=int, default=MATCH_SIZE)
+    parser.add_argument("--match-duration", type=float, default=MATCH_DURATION)
     parser.add_argument("--db", default="game.db")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    server = GameServer(args.db)
-    port = await server.start(args.host, args.port)
-    log.info("listening on %s:%d", args.host, port)
+    server = GameServer(args.db, args.match_size, args.match_duration, args.public_host)
+    port = await server.start(args.host, args.port, args.battle_port)
+    log.info("lobby on %s:%d (tcp), battle on %s:%d (udp), match size %d",
+             args.host, port, args.host, server.battle_port, server.match_size)
     try:
         await asyncio.Event().wait()
     finally:
