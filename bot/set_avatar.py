@@ -17,11 +17,11 @@ AVATAR = Path(__file__).resolve().parent.parent / "channel" / "assets" / "avatar
 
 
 def main():
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         print("Не задан TELEGRAM_BOT_TOKEN.", file=sys.stderr)
         return 1
-    chat_id = os.environ.get("TELEGRAM_CHANNEL_ID", "@VirtualBiznesChannel")
+    chat_id = os.environ.get("TELEGRAM_CHANNEL_ID", "@VirtualBiznesChannel").strip()
 
     boundary = uuid.uuid4().hex
     body = (
