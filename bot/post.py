@@ -88,7 +88,7 @@ def main():
         print("Все посты уже опубликованы. Добавьте новые в channel/posts.")
         return 0
 
-    chat_id = os.environ.get("TELEGRAM_CHANNEL_ID", "@brawl_taktika")
+    chat_id = os.environ.get("TELEGRAM_CHANNEL_ID", "@virtual_biznes")
     method, payload = build_request(path, chat_id)
 
     if dry_run:
