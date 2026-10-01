@@ -88,7 +88,7 @@ def main():
         print("Все посты уже опубликованы. Добавьте новые в channel/posts.")
         return 0
 
-    chat_id = os.environ.get("TELEGRAM_CHANNEL_ID", "@VirtualBiznesChannel")
+    chat_id = os.environ.get("TELEGRAM_CHANNEL_ID", "@VirtualBiznesChannel").strip()
     method, payload = build_request(path, chat_id)
 
     if dry_run:
@@ -96,7 +96,7 @@ def main():
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         print("Не задан TELEGRAM_BOT_TOKEN.", file=sys.stderr)
         return 1
